@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Gesture to Speech</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React Libraries -->
+    <script src="https://unpkg.com/react@17/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- TensorFlow.js and Handpose Model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose@0.0.7/dist/handpose.min.js"></script>
+</head>
+<body class="bg-gray-900">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Main App Component
+        function App() {
+          const [status, setStatus] = useState('Loading models...');
+          const [gesture, setGesture] = useState('None');
+          const [isAppReady, setIsAppReady] = useState(false);
+
+          const videoRef = useRef(null);
+          const canvasRef = useRef(null);
+
+          // --- Refs for core logic ---
+          const modelRef = useRef(null);
+          const lastSpokenGesture = useRef(null);
+          const lastSpokenTime = useRef(0);
+          const stableGestureRef = useRef(null);
+          const stableCountRef = useRef(0);
+
+          // --- Constants ---
+          const REQUIRED_STABILITY = 10;
+          const MIN_SPEAK_DELAY = 2000; // 2 seconds in milliseconds
+
+          // --- Gesture Definitions ---
+          const GESTURES = {
+            VICTORY: 'Victory',
+            THUMBS_UP: 'Thumbs Up',
+            ONE: 'One',
+            TWO: 'Two',
+            THREE: 'Three',
+            FOUR: 'Four',
+            FIVE: 'Five / Open Hand',
+            FIST: 'Fist / Closed Hand',
+          };
+
+          // 1. --- Initialization ---
+          useEffect(() => {
+            async function setup() {
+              try {
+                // Ensure tf and handpose are loaded from the window object
+                if (!window.tf || !window.handpose) {
+                    setStatus("Error: TensorFlow or Handpose model not loaded.");
+                    return;
+                }
+
+                setStatus('Initializing TensorFlow.js...');
+                await window.tf.ready();
+                
+                setStatus('Loading Handpose model...');
+                modelRef.current = await window.handpose.load();
+                
+                setStatus('Setting up camera...');
+                await setupCamera();
+
+                setStatus('System Ready. Show your hand.');
+                setIsAppReady(true);
+              } catch (error) {
+                console.error("Initialization failed:", error);
+                setStatus(`Error: ${error.message}`);
+              }
+            }
+            setup();
+          }, []);
+
+          // 2. --- Camera Setup ---
+          const setupCamera = async () => {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+              const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 640, height: 480, facingMode: 'user' }
+              });
+              if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+                return new Promise((resolve) => {
+                  videoRef.current.onloadedmetadata = () => resolve();
+                });
+              }
+            } else {
+              throw new Error("Your browser does not support camera access.");
+            }
+          };
+
+          // 3. --- Main Detection Loop ---
+          useEffect(() => {
+            if (isAppReady) {
+              const intervalId = setInterval(() => {
+                runHandpose();
+              }, 100); // Run detection every 100ms
+              return () => clearInterval(intervalId);
+            }
+          }, [isAppReady]);
+
+          const runHandpose = async () => {
+            if (modelRef.current && videoRef.current && videoRef.current.readyState === 4) {
+              const video = videoRef.current;
+              const predictions = await modelRef.current.estimateHands(video);
+              
+              if (canvasRef.current) {
+                  const ctx = canvasRef.current.getContext('2d');
+                  ctx.clearRect(0, 0, 640, 480);
+
+                  if (predictions.length > 0) {
+                    drawHand(predictions, ctx);
+                    const recognizedGesture = recognizeGesture(predictions[0].landmarks);
+                    updateGestureStability(recognizedGesture);
+                  } else {
+                    updateGestureStability(null); // No hand detected
+                  }
+              }
+            }
+          };
+          
+          // 4. --- Gesture Recognition Logic ---
+          const recognizeGesture = (landmarks) => {
+              const fingerTips = [4, 8, 12, 16, 20];
+              const fingerPips = [3, 6, 10, 14, 18];
+
+              const thumbTip = landmarks[4];
+              const thumbMcp = landmarks[2];
+              const indexPip = landmarks[6];
+              const middlePip = landmarks[10];
+              const ringPip = landmarks[14];
+              const pinkyPip = landmarks[18];
+
+              if (thumbTip[1] < thumbMcp[1] && 
+                  landmarks[8][1] > indexPip[1] &&
+                  landmarks[12][1] > middlePip[1] &&
+                  landmarks[16][1] > ringPip[1] &&
+                  landmarks[20][1] > pinkyPip[1]) {
+                  return GESTURES.THUMBS_UP;
+              }
+
+              let extendedFingers = 0;
+              for (let i = 0; i < 5; i++) {
+                  if (landmarks[fingerTips[i]][1] < landmarks[fingerPips[i]][1]) {
+                      extendedFingers++;
+                  }
+              }
+              
+              if (extendedFingers === 5) return GESTURES.FIVE;
+              if (extendedFingers === 4) return GESTURES.FOUR;
+              if (extendedFingers === 3) return GESTURES.THREE;
+              if (extendedFingers === 2) {
+                const indexTip = landmarks[8];
+                const middleTip = landmarks[12];
+                if (indexTip[1] < landmarks[6][1] && middleTip[1] < landmarks[10][1] &&
+                    landmarks[16][1] > ringPip[1] && landmarks[20][1] > landmarks[18][1]) {
+                     return GESTURES.VICTORY;
+                }
+                return GESTURES.TWO;
+              }
+              if (extendedFingers === 1) return GESTURES.ONE;
+              if (extendedFingers === 0) return GESTURES.FIST;
+
+              return null;
+          };
+
+          // 5. --- Gesture Stability & Speech ---
+          const updateGestureStability = (currentGesture) => {
+              if (currentGesture === stableGestureRef.current) {
+                  stableCountRef.current++;
+              } else {
+                  stableGestureRef.current = currentGesture;
+                  stableCountRef.current = 0;
+              }
+
+              setGesture(currentGesture || 'None');
+
+              const now = Date.now();
+              if (
+                  stableCountRef.current > REQUIRED_STABILITY &&
+                  currentGesture &&
+                  currentGesture !== lastSpokenGesture.current &&
+                  (now - lastSpokenTime.current) > MIN_SPEAK_DELAY
+              ) {
+                  speak(currentGesture);
+                  lastSpokenGesture.current = currentGesture;
+                  lastSpokenTime.current = now;
+                  stableCountRef.current = 0;
+              }
+          };
+
+          // 6. --- Text-to-Speech ---
+          const speak = (text) => {
+            if (!window.speechSynthesis) {
+                console.error("Speech synthesis not supported.");
+                setStatus("Error: Speech synthesis not supported.");
+                return;
+            }
+            try {
+              window.speechSynthesis.cancel();
+              const utterance = new SpeechSynthesisUtterance(text);
+              utterance.lang = 'en-US';
+              utterance.rate = 1.0;
+              window.speechSynthesis.speak(utterance);
+            } catch (error) {
+              console.error("Speech synthesis failed:", error);
+              setStatus("Error: Could not speak.");
+            }
+          };
+
+          // 7. --- Drawing Utility ---
+          const drawHand = (predictions, ctx) => {
+            predictions.forEach((prediction) => {
+              const landmarks = prediction.landmarks;
+              const connections = [
+                [0, 1], [1, 2], [2, 3], [3, 4], // Thumb
+                [0, 5], [5, 6], [6, 7], [7, 8], // Index
+                [5, 9], [9, 10], [10, 11], [11, 12], // Middle
+                [9, 13], [13, 14], [14, 15], [15, 16], // Ring
+                [13, 17], [0, 17], [17, 18], [18, 19], [19, 20] // Pinky and Palm
+              ];
+              ctx.strokeStyle = '#00FF00';
+              ctx.lineWidth = 3;
+              connections.forEach(connection => {
+                  const [startIdx, endIdx] = connection;
+                  const start = landmarks[startIdx];
+                  const end = landmarks[endIdx];
+                  ctx.beginPath();
+                  ctx.moveTo(start[0], start[1]);
+                  ctx.lineTo(end[0], end[1]);
+                  ctx.stroke();
+              });
+              ctx.fillStyle = '#FF0000';
+              for (let i = 0; i < landmarks.length; i++) {
+                const [x, y] = landmarks[i];
+                ctx.beginPath();
+                ctx.arc(x, y, 5, 0, 2 * Math.PI);
+                ctx.fill();
+              }
+            });
+          };
+
+          // --- UI Rendering ---
+          return (
+            <div className="min-h-screen flex flex-col items-center justify-center font-sans p-4">
+              <h1 className="text-4xl font-bold mb-2 text-white">Hand Gesture to Speech</h1>
+              <p className="text-lg text-gray-400 mb-4">Helping to bridge communication gaps.</p>
+              
+              <div className="relative w-full max-w-2xl mx-auto border-4 border-teal-500 rounded-lg shadow-2xl overflow-hidden">
+                <video ref={videoRef} autoPlay playsInline muted className="w-full h-auto transform scaleX-[-1]"></video>
+                <canvas ref={canvasRef} width="640" height="480" className="absolute top-0 left-0 w-full h-full transform scaleX-[-1]"></canvas>
+              </div>
+
+              <div className="mt-6 w-full max-w-2xl text-center">
+                <div className="bg-gray-800 p-4 rounded-lg">
+                  <p className="text-gray-400 text-sm mb-1">STATUS</p>
+                  <p className="text-teal-400 text-xl font-semibold">{status}</p>
+                </div>
+                <div className="bg-gray-800 p-4 rounded-lg mt-4">
+                  <p className="text-gray-400 text-sm mb-1">DETECTED GESTURE</p>
+                  <p className="text-2xl font-bold text-white">{gesture}</p>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
